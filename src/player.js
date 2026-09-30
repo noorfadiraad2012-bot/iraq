@@ -2,12 +2,27 @@ const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
 const { Client } = require("discord.js-selfbot-v13");
-const { Streamer, prepareStream, playStream } = require("@dank074/discord-video-stream");
 const ffmpeg = require("fluent-ffmpeg");
 const youtubedl = require("youtube-dl-exec");
 const log = require("./logger");
 
 const MEDIA_ROOT = path.resolve(process.cwd(), "media");
+
+// ESM-only package — load via dynamic import
+let Streamer, prepareStream, playStream;
+let dvsReady = null;
+
+function loadDvs() {
+  if (!dvsReady) {
+    dvsReady = import("@dank074/discord-video-stream").then((mod) => {
+      Streamer = mod.Streamer;
+      prepareStream = mod.prepareStream;
+      playStream = mod.playStream;
+      return mod;
+    });
+  }
+  return dvsReady;
+}
 
 try {
   let hasSystemFfmpeg = false;
@@ -17,11 +32,13 @@ try {
   } catch {}
 
   if (!hasSystemFfmpeg) {
-    const ffmpegStatic = require("ffmpeg-static");
-    if (ffmpegStatic) {
-      ffmpeg.setFfmpegPath(ffmpegStatic);
-      process.env.FFMPEG_PATH = ffmpegStatic;
-    }
+    try {
+      const ffmpegStatic = require("ffmpeg-static");
+      if (ffmpegStatic) {
+        ffmpeg.setFfmpegPath(ffmpegStatic);
+        process.env.FFMPEG_PATH = ffmpegStatic;
+      }
+    } catch {}
   }
 } catch {}
 
@@ -38,7 +55,6 @@ function isSafeHttpUrl(url) {
   }
 }
 
-/** Only allow local files under ./media (prevents path traversal). */
 function resolveSafeLocalPath(input) {
   if (!fs.existsSync(MEDIA_ROOT)) {
     fs.mkdirSync(MEDIA_ROOT, { recursive: true });
@@ -58,7 +74,7 @@ class VideoPlayer {
   constructor(config) {
     this.config = config;
     this.client = new Client({ checkUpdate: false });
-    this.streamer = new Streamer(this.client);
+    this.streamer = null;
 
     this.streaming = false;
     this.abortCtrl = null;
@@ -69,7 +85,16 @@ class VideoPlayer {
     this.channelId = null;
   }
 
+  async ensureStreamer() {
+    await loadDvs();
+    if (!this.streamer) {
+      this.streamer = new Streamer(this.client);
+    }
+    return this.streamer;
+  }
+
   async join(guildId, channelId) {
+    await this.ensureStreamer();
     if (this.channelId === channelId) return;
 
     if (this.channelId) {
@@ -86,6 +111,8 @@ class VideoPlayer {
   }
 
   async play(videoSource, streamType = this.config.streamType) {
+    await this.ensureStreamer();
+
     if (this._playLock || this.streaming) {
       throw new Error("في بث شغال حالياً — استخدم !stop أولاً");
     }
@@ -99,7 +126,6 @@ class VideoPlayer {
         throw new Error("الرابط أو المسار فارغ");
       }
 
-      // Local file: only under ./media
       if (!input.startsWith("http://") && !input.startsWith("https://")) {
         input = resolveSafeLocalPath(input);
       } else {
@@ -233,7 +259,7 @@ class VideoPlayer {
     }
 
     try {
-      this.streamer.stopStream();
+      if (this.streamer) this.streamer.stopStream();
     } catch {}
 
     await new Promise((r) => setTimeout(r, 300));
@@ -243,7 +269,7 @@ class VideoPlayer {
   async leave() {
     await this.stop();
     try {
-      this.streamer.leaveVoice();
+      if (this.streamer) this.streamer.leaveVoice();
     } catch {}
     this.guildId = null;
     this.channelId = null;
